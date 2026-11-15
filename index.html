@@ -1,21 +1,231 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Cloak and Lantern</title>
-  <style>
-    body {
-      background: #0b1a12;
-      color: #d9a441;
-      font-family: Georgia, serif;
-      text-align: center;
-      padding-top: 30vh;
-    }
-  </style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cloak and Lantern</title>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
+<style>
+  :root { --bg:#0b1a12; --panel:#12261a; --gold:#d9a441; --cream:#f1e6c8; --ink:#2a2118; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--cream); font-family:Georgia,serif; height:100dvh; display:flex; flex-direction:column; }
+  h1,h2 { color:var(--gold); font-weight:normal; margin:0; }
+  .screen { display:none; flex:1; min-height:0; }
+  .screen.on { display:flex; }
+  #landing { flex-direction:column; align-items:center; padding:24px 16px; gap:18px; overflow:auto; }
+  .card { background:var(--panel); border:1px solid var(--gold); border-radius:8px; padding:16px; width:100%; max-width:380px; display:flex; flex-direction:column; gap:10px; }
+  input, button { font:inherit; padding:10px; border-radius:6px; border:1px solid var(--gold); }
+  input { background:#0b1a12; color:var(--cream); }
+  button { background:var(--gold); color:var(--ink); cursor:pointer; }
+  button.ghost { background:transparent; color:var(--gold); }
+  #err { color:#ff8a80; min-height:1.2em; text-align:center; }
+  #side { width:210px; background:var(--panel); border-right:1px solid var(--gold); padding:12px; display:flex; flex-direction:column; gap:8px; overflow:auto; }
+  #main { flex:1; display:flex; flex-direction:column; min-width:0; }
+  #head { padding:10px 14px; border-bottom:1px solid var(--gold); display:flex; justify-content:space-between; gap:8px; align-items:center; }
+  #msgs { flex:1; overflow:auto; padding:12px; display:flex; flex-direction:column; gap:8px; }
+  .m { background:#f1e6c8; color:var(--ink); border-radius:10px; padding:8px 12px; max-width:80%; align-self:flex-start; overflow-wrap:anywhere; }
+  .m.mine { align-self:flex-end; background:#e2c97e; }
+  .m b { display:block; font-size:.8em; opacity:.7; }
+  #send { display:flex; gap:8px; padding:10px; border-top:1px solid var(--gold); }
+  #send input { flex:1; }
+  .room { text-align:left; background:transparent; color:var(--cream); border:1px solid transparent; }
+  .room.sel { border-color:var(--gold); color:var(--gold); }
+  #newroom { display:none; background:var(--bg); border:1px solid var(--gold); border-radius:8px; padding:10px; flex-direction:column; gap:6px; }
+  #newroom label { display:block; }
+  @media (max-width:640px) { #game.on { flex-direction:column; } #side { width:100%; max-height:35%; border-right:0; border-bottom:1px solid var(--gold); } }
+</style>
 </head>
 <body>
+
+<div id="landing" class="screen on">
   <h1>Cloak and Lantern</h1>
-  <p>The candles are being lit...</p>
+  <div id="err"></div>
+  <div class="card">
+    <h2>Start a new game</h2>
+    <input id="cg-name" placeholder="Game name">
+    <input id="cg-me" placeholder="Your display name" maxlength="24">
+    <button onclick="createGame()">Create game</button>
+  </div>
+  <div class="card">
+    <h2>Join a game</h2>
+    <input id="jg-code" placeholder="Join code">
+    <input id="jg-me" placeholder="Your display name" maxlength="24">
+    <button onclick="joinGame()">Join</button>
+  </div>
+</div>
+
+<div id="game" class="screen">
+  <div id="side">
+    <h2 id="gname"></h2>
+    <small>Join code: <b id="code"></b></small>
+    <div id="rooms"></div>
+    <button class="ghost" onclick="toggleNewRoom()">+ New private room</button>
+    <div id="newroom">
+      <input id="nr-name" placeholder="Room name" maxlength="40">
+      <div id="nr-players"></div>
+      <button onclick="makeRoom()">Create room</button>
+    </div>
+  </div>
+  <div id="main">
+    <div id="head"><h2 id="rname"></h2><small id="who"></small></div>
+    <div id="msgs"></div>
+    <form id="send" onsubmit="sendMsg(event)">
+      <input id="text" placeholder="Say something..." maxlength="1000" autocomplete="off">
+      <button>Send</button>
+    </form>
+  </div>
+</div>
+
+<script>
+const SUPABASE_URL = "https://kjvgvzreapdrjxtjcpfm.supabase.co";
+const SUPABASE_KEY = "sb_publishable_PINxqSLLl1Udzq6krzcrsg_LPsjHe8K";
+const db = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+const $ = id => document.getElementById(id);
+
+let userId = null, me = null, game = null, rooms = [], players = {}, current = null, seen = new Set(), unread = new Set();
+
+function fail(e) { $("err").textContent = (e && e.message) ? e.message : String(e); }
+function screen(id) { document.querySelectorAll(".screen").forEach(s => s.classList.remove("on")); $(id).classList.add("on"); }
+
+async function start() {
+  let { data } = await db.auth.getSession();
+  if (!data.session) {
+    const r = await db.auth.signInAnonymously();
+    if (r.error) return fail(r.error);
+    data = r.data;
+  }
+  userId = data.session.user.id;
+  const { data: mine, error } = await db.from("players").select("*").eq("user_id", userId).limit(1);
+  if (error) return fail(error);
+  if (mine.length) enterGame(mine[0]);
+}
+
+async function createGame() {
+  $("err").textContent = "";
+  const { error } = await db.rpc("create_game", { p_name: $("cg-name").value, p_display_name: $("cg-me").value });
+  if (error) return fail(error);
+  start();
+}
+
+async function joinGame() {
+  $("err").textContent = "";
+  const { error } = await db.rpc("join_game", { p_code: $("jg-code").value, p_display_name: $("jg-me").value });
+  if (error) return fail(error);
+  start();
+}
+
+async function enterGame(p) {
+  me = p;
+  const { data: g } = await db.from("games").select("*").eq("id", p.game_id).single();
+  game = g;
+  $("gname").textContent = g.name;
+  $("code").textContent = g.join_code;
+  $("who").textContent = "You are " + p.display_name;
+  screen("game");
+  await loadPlayers();
+  await loadRooms();
+  const hall = rooms.find(r => r.kind === "hall");
+  if (hall) openRoom(hall.id);
+  subscribe();
+}
+
+async function loadPlayers() {
+  const { data } = await db.from("players").select("*").eq("game_id", game.id);
+  players = {};
+  (data || []).forEach(p => players[p.id] = p);
+}
+
+async function loadRooms() {
+  const { data } = await db.from("rooms").select("*").eq("game_id", game.id).order("created_at");
+  rooms = data || [];
+  const box = $("rooms");
+  box.innerHTML = "";
+  rooms.forEach(r => {
+    const b = document.createElement("button");
+    b.className = "room" + (r.id === current ? " sel" : "");
+    b.textContent = (r.kind === "hall" ? "The Hall" : r.name) + (unread.has(r.id) ? " •" : "");
+    b.onclick = () => openRoom(r.id);
+    box.appendChild(b);
+  });
+}
+
+async function openRoom(id) {
+  current = id;
+  unread.delete(id);
+  const room = rooms.find(r => r.id === id);
+  $("rname").textContent = room.kind === "hall" ? "The Hall" : room.name;
+  loadRooms();
+  const { data } = await db.from("messages").select("*").eq("room_id", id).order("created_at").limit(200);
+  $("msgs").innerHTML = "";
+  seen = new Set();
+  (data || []).forEach(addMessage);
+}
+
+function addMessage(m) {
+  if (seen.has(m.id)) return;
+  seen.add(m.id);
+  const d = document.createElement("div");
+  d.className = "m" + (m.player_id === me.id ? " mine" : "");
+  const n = document.createElement("b");
+  n.textContent = players[m.player_id] ? players[m.player_id].display_name : "Unknown";
+  const t = document.createElement("span");
+  t.textContent = m.body;
+  d.appendChild(n); d.appendChild(t);
+  const box = $("msgs");
+  box.appendChild(d);
+  box.scrollTop = box.scrollHeight;
+}
+
+async function sendMsg(e) {
+  e.preventDefault();
+  const body = $("text").value.trim();
+  if (!body) return;
+  $("text").value = "";
+  const { error } = await db.from("messages").insert({ room_id: current, player_id: me.id, body });
+  if (error) alert(error.message);
+}
+
+function subscribe() {
+  db.channel("cloak-and-lantern")
+    .on("postgres_changes", { event: "INSERT", schema: "public", table: "messages" }, async p => {
+      const m = p.new;
+      if (!players[m.player_id]) await loadPlayers();
+      if (m.room_id === current) addMessage(m);
+      else { unread.add(m.room_id); loadRooms(); }
+    })
+    .on("postgres_changes", { event: "INSERT", schema: "public", table: "room_members" }, () => loadRooms())
+    .on("postgres_changes", { event: "INSERT", schema: "public", table: "players" }, () => loadPlayers())
+    .subscribe();
+}
+
+function toggleNewRoom() {
+  const box = $("newroom");
+  if (box.style.display === "flex") { box.style.display = "none"; return; }
+  const list = $("nr-players");
+  list.innerHTML = "";
+  Object.values(players).filter(p => p.id !== me.id).forEach(p => {
+    const l = document.createElement("label");
+    const c = document.createElement("input");
+    c.type = "checkbox"; c.value = p.id;
+    l.appendChild(c);
+    l.appendChild(document.createTextNode(" " + p.display_name));
+    list.appendChild(l);
+  });
+  box.style.display = "flex";
+}
+
+async function makeRoom() {
+  const ids = [...document.querySelectorAll("#nr-players input:checked")].map(c => c.value);
+  const name = $("nr-name").value.trim() || "Private room";
+  const { data, error } = await db.rpc("create_private_room", { p_game: game.id, p_name: name, p_members: ids });
+  if (error) return alert(error.message);
+  $("newroom").style.display = "none";
+  $("nr-name").value = "";
+  await loadRooms();
+  openRoom(data);
+}
+
+start();
+</script>
 </body>
 </html>
