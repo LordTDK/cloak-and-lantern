@@ -2,37 +2,52 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Cloak and Lantern</title>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
 <style>
   :root { --bg:#0b1a12; --panel:#12261a; --gold:#d9a441; --cream:#f1e6c8; --ink:#2a2118; }
   * { box-sizing: border-box; }
-  body { margin:0; background:var(--bg); color:var(--cream); font-family:Georgia,serif; height:100dvh; display:flex; flex-direction:column; }
+  html, body { height:100%; }
+  body { margin:0; background:var(--bg); color:var(--cream); font-family:Georgia,serif; display:flex; flex-direction:column; height:100dvh; }
   h1,h2 { color:var(--gold); font-weight:normal; margin:0; }
   .screen { display:none; flex:1; min-height:0; }
   .screen.on { display:flex; }
   #landing { flex-direction:column; align-items:center; padding:24px 16px; gap:18px; overflow:auto; }
   .card { background:var(--panel); border:1px solid var(--gold); border-radius:8px; padding:16px; width:100%; max-width:380px; display:flex; flex-direction:column; gap:10px; }
-  input, button { font:inherit; padding:10px; border-radius:6px; border:1px solid var(--gold); }
+  input, button { font:inherit; font-size:16px; padding:10px; border-radius:6px; border:1px solid var(--gold); min-height:44px; }
   input { background:#0b1a12; color:var(--cream); }
   button { background:var(--gold); color:var(--ink); cursor:pointer; }
   button.ghost { background:transparent; color:var(--gold); }
+  button.danger { background:transparent; color:#ff8a80; border-color:#ff8a80; }
   #err { color:#ff8a80; min-height:1.2em; text-align:center; }
-  #side { width:210px; background:var(--panel); border-right:1px solid var(--gold); padding:12px; display:flex; flex-direction:column; gap:8px; overflow:auto; }
+
+  #side { width:240px; background:var(--panel); border-right:1px solid var(--gold); padding:12px; display:flex; flex-direction:column; gap:8px; overflow:auto; }
+  #rooms { display:flex; flex-direction:column; gap:4px; flex:1; }
   #main { flex:1; display:flex; flex-direction:column; min-width:0; }
-  #head { padding:10px 14px; border-bottom:1px solid var(--gold); display:flex; justify-content:space-between; gap:8px; align-items:center; }
+  #head { padding:8px 12px; border-bottom:1px solid var(--gold); display:flex; gap:10px; align-items:center; padding-top:calc(8px + env(safe-area-inset-top)); }
+  #head h2 { flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  #menu { display:none; position:relative; padding:6px 12px; }
+  #menudot { display:none; position:absolute; top:4px; right:4px; width:10px; height:10px; border-radius:50%; background:#c0392b; }
   #msgs { flex:1; overflow:auto; padding:12px; display:flex; flex-direction:column; gap:8px; }
-  .m { background:#f1e6c8; color:var(--ink); border-radius:10px; padding:8px 12px; max-width:80%; align-self:flex-start; overflow-wrap:anywhere; }
+  .m { background:#f1e6c8; color:var(--ink); border-radius:10px; padding:8px 12px; max-width:85%; align-self:flex-start; overflow-wrap:anywhere; }
   .m.mine { align-self:flex-end; background:#e2c97e; }
   .m b { display:block; font-size:.8em; opacity:.7; }
-  #send { display:flex; gap:8px; padding:10px; border-top:1px solid var(--gold); }
-  #send input { flex:1; }
+  #send { display:flex; gap:8px; padding:10px; padding-bottom:calc(10px + env(safe-area-inset-bottom)); border-top:1px solid var(--gold); }
+  #send input { flex:1; min-width:0; }
   .room { text-align:left; background:transparent; color:var(--cream); border:1px solid transparent; }
   .room.sel { border-color:var(--gold); color:var(--gold); }
   #newroom { display:none; background:var(--bg); border:1px solid var(--gold); border-radius:8px; padding:10px; flex-direction:column; gap:6px; }
-  #newroom label { display:block; }
-  @media (max-width:640px) { #game.on { flex-direction:column; } #side { width:100%; max-height:35%; border-right:0; border-bottom:1px solid var(--gold); } }
+  #newroom label { display:flex; align-items:center; gap:8px; min-height:36px; }
+  #newroom label input { min-height:0; width:20px; height:20px; }
+  #scrim { display:none; position:fixed; inset:0; background:rgba(0,0,0,.6); z-index:10; }
+
+  @media (max-width:700px) {
+    #menu { display:block; }
+    #side { position:fixed; top:0; left:0; bottom:0; width:82%; max-width:320px; z-index:20; transform:translateX(-100%); transition:transform .2s; padding-top:calc(12px + env(safe-area-inset-top)); padding-bottom:calc(12px + env(safe-area-inset-bottom)); }
+    #side.open { transform:none; }
+    #scrim.on { display:block; }
+  }
 </style>
 </head>
 <body>
@@ -55,6 +70,7 @@
 </div>
 
 <div id="game" class="screen">
+  <div id="scrim" onclick="closeDrawer()"></div>
   <div id="side">
     <h2 id="gname"></h2>
     <small>Join code: <b id="code"></b></small>
@@ -65,9 +81,14 @@
       <div id="nr-players"></div>
       <button onclick="makeRoom()">Create room</button>
     </div>
+    <button class="danger" onclick="leaveGame()">Leave game</button>
   </div>
   <div id="main">
-    <div id="head"><h2 id="rname"></h2><small id="who"></small></div>
+    <div id="head">
+      <button id="menu" class="ghost" onclick="openDrawer()" aria-label="Rooms">&#9776;<span id="menudot"></span></button>
+      <h2 id="rname"></h2>
+      <small id="who"></small>
+    </div>
     <div id="msgs"></div>
     <form id="send" onsubmit="sendMsg(event)">
       <input id="text" placeholder="Say something..." maxlength="1000" autocomplete="off">
@@ -82,10 +103,13 @@ const SUPABASE_KEY = "sb_publishable_PINxqSLLl1Udzq6krzcrsg_LPsjHe8K";
 const db = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 const $ = id => document.getElementById(id);
 
-let userId = null, me = null, game = null, rooms = [], players = {}, current = null, seen = new Set(), unread = new Set();
+let userId = null, me = null, game = null, rooms = [], players = {}, current = null, channel = null;
+let seen = new Set(), unread = new Set();
 
 function fail(e) { $("err").textContent = (e && e.message) ? e.message : String(e); }
 function screen(id) { document.querySelectorAll(".screen").forEach(s => s.classList.remove("on")); $(id).classList.add("on"); }
+function openDrawer() { $("side").classList.add("open"); $("scrim").classList.add("on"); }
+function closeDrawer() { $("side").classList.remove("open"); $("scrim").classList.remove("on"); }
 
 async function start() {
   let { data } = await db.auth.getSession();
@@ -114,13 +138,26 @@ async function joinGame() {
   start();
 }
 
+async function leaveGame() {
+  if (!confirm("Leave this game? You will lose your place and your messages will be removed.")) return;
+  const { error } = await db.rpc("leave_game", { p_game: game.id });
+  if (error) return alert(error.message);
+  if (channel) await db.removeChannel(channel);
+  channel = null; me = null; game = null; rooms = []; players = {}; current = null;
+  unread = new Set(); seen = new Set();
+  $("msgs").innerHTML = "";
+  $("err").textContent = "";
+  closeDrawer();
+  screen("landing");
+}
+
 async function enterGame(p) {
   me = p;
   const { data: g } = await db.from("games").select("*").eq("id", p.game_id).single();
   game = g;
   $("gname").textContent = g.name;
   $("code").textContent = g.join_code;
-  $("who").textContent = "You are " + p.display_name;
+  $("who").textContent = p.display_name;
   screen("game");
   await loadPlayers();
   await loadRooms();
@@ -136,6 +173,7 @@ async function loadPlayers() {
 }
 
 async function loadRooms() {
+  if (!game) return;
   const { data } = await db.from("rooms").select("*").eq("game_id", game.id).order("created_at");
   rooms = data || [];
   const box = $("rooms");
@@ -143,15 +181,17 @@ async function loadRooms() {
   rooms.forEach(r => {
     const b = document.createElement("button");
     b.className = "room" + (r.id === current ? " sel" : "");
-    b.textContent = (r.kind === "hall" ? "The Hall" : r.name) + (unread.has(r.id) ? " •" : "");
+    b.textContent = (r.kind === "hall" ? "The Hall" : r.name) + (unread.has(r.id) ? " \u2022" : "");
     b.onclick = () => openRoom(r.id);
     box.appendChild(b);
   });
+  $("menudot").style.display = unread.size ? "block" : "none";
 }
 
 async function openRoom(id) {
   current = id;
   unread.delete(id);
+  closeDrawer();
   const room = rooms.find(r => r.id === id);
   $("rname").textContent = room.kind === "hall" ? "The Hall" : room.name;
   loadRooms();
@@ -186,7 +226,7 @@ async function sendMsg(e) {
 }
 
 function subscribe() {
-  db.channel("cloak-and-lantern")
+  channel = db.channel("cloak-and-lantern")
     .on("postgres_changes", { event: "INSERT", schema: "public", table: "messages" }, async p => {
       const m = p.new;
       if (!players[m.player_id]) await loadPlayers();
@@ -194,7 +234,7 @@ function subscribe() {
       else { unread.add(m.room_id); loadRooms(); }
     })
     .on("postgres_changes", { event: "INSERT", schema: "public", table: "room_members" }, () => loadRooms())
-    .on("postgres_changes", { event: "INSERT", schema: "public", table: "players" }, () => loadPlayers())
+    .on("postgres_changes", { event: "*", schema: "public", table: "players" }, () => loadPlayers())
     .subscribe();
 }
 
@@ -208,7 +248,7 @@ function toggleNewRoom() {
     const c = document.createElement("input");
     c.type = "checkbox"; c.value = p.id;
     l.appendChild(c);
-    l.appendChild(document.createTextNode(" " + p.display_name));
+    l.appendChild(document.createTextNode(p.display_name));
     list.appendChild(l);
   });
   box.style.display = "flex";
