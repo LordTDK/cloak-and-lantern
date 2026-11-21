@@ -18,9 +18,20 @@
   input, button { font:inherit; font-size:16px; padding:10px; border-radius:6px; border:1px solid var(--gold); min-height:44px; }
   input { background:#0b1a12; color:var(--cream); }
   button { background:var(--gold); color:var(--ink); cursor:pointer; }
+  button:disabled { opacity:.5; cursor:not-allowed; }
   button.ghost { background:transparent; color:var(--gold); }
   button.danger { background:transparent; color:#ff8a80; border-color:#ff8a80; }
   #err { color:#ff8a80; min-height:1.2em; text-align:center; }
+
+  #lobby { flex-direction:column; align-items:center; gap:16px; overflow:auto; padding:24px 16px; padding-top:calc(24px + env(safe-area-inset-top)); padding-bottom:calc(24px + env(safe-area-inset-bottom)); }
+  #lobby h1 { text-align:center; overflow-wrap:anywhere; }
+  #lobby > button { width:100%; max-width:380px; }
+  .bigcode { font-size:2.4rem; letter-spacing:.3em; padding-left:.3em; color:var(--gold); text-align:center; }
+  #lb-list { display:flex; flex-wrap:wrap; gap:6px; }
+  .chip { border:1px solid var(--gold); border-radius:20px; padding:4px 12px; }
+  .chip.host { background:var(--gold); color:var(--ink); }
+  #lb-host { display:none; flex-direction:column; gap:8px; width:100%; max-width:380px; text-align:center; }
+  #lb-wait { display:none; text-align:center; opacity:.85; }
 
   #side { width:240px; background:var(--panel); border-right:1px solid var(--gold); padding:12px; display:flex; flex-direction:column; gap:8px; overflow:auto; }
   #rooms { display:flex; flex-direction:column; gap:4px; flex:1; }
@@ -69,6 +80,26 @@
   </div>
 </div>
 
+<div id="lobby" class="screen">
+  <h1 id="lb-name"></h1>
+  <div class="card">
+    <small>Join code</small>
+    <div id="lb-code" class="bigcode"></div>
+    <small>Share this code with your players.</small>
+  </div>
+  <div class="card">
+    <h2 id="lb-count"></h2>
+    <div id="lb-list"></div>
+  </div>
+  <div id="lb-host">
+    <button id="lb-start" onclick="startGame()">Start the game</button>
+    <small id="lb-hint"></small>
+  </div>
+  <div id="lb-wait">Waiting for the host to start the game&hellip;</div>
+  <button class="ghost notifybtn" onclick="toggleNotify()"></button>
+  <button class="danger" onclick="leaveGame()">Leave game</button>
+</div>
+
 <div id="game" class="screen">
   <div id="scrim" onclick="closeDrawer()"></div>
   <div id="side">
@@ -81,6 +112,7 @@
       <div id="nr-players"></div>
       <button onclick="makeRoom()">Create room</button>
     </div>
+    <button class="ghost notifybtn" onclick="toggleNotify()"></button>
     <button class="danger" onclick="leaveGame()">Leave game</button>
   </div>
   <div id="main">
@@ -103,14 +135,86 @@ const SUPABASE_KEY = "sb_publishable_PINxqSLLl1Udzq6krzcrsg_LPsjHe8K";
 const db = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 const $ = id => document.getElementById(id);
 
+// Keep this in sync with the start_game function in the database.
+// Testing value. Change both to 6 before playing real games.
+const MIN_PLAYERS = 2;
+const BASE_TITLE = "Cloak and Lantern";
+
 let userId = null, me = null, game = null, rooms = [], players = {}, current = null, channel = null;
 let seen = new Set(), unread = new Set();
+let chatStarted = false, missed = 0, actx = null;
 
 function fail(e) { $("err").textContent = (e && e.message) ? e.message : String(e); }
 function screen(id) { document.querySelectorAll(".screen").forEach(s => s.classList.remove("on")); $(id).classList.add("on"); }
 function openDrawer() { $("side").classList.add("open"); $("scrim").classList.add("on"); }
 function closeDrawer() { $("side").classList.remove("open"); $("scrim").classList.remove("on"); }
 
+/* ---------- Notifications ---------- */
+function notifySupported() { return "Notification" in window; }
+function notifyOn() {
+  try { return localStorage.getItem("cl_notify") === "1" && notifySupported() && Notification.permission === "granted"; }
+  catch (e) { return false; }
+}
+function updateNotifyUI() {
+  const label = notifyOn() ? "Notifications: on (tap to turn off)" : "Turn on notifications";
+  document.querySelectorAll(".notifybtn").forEach(b => b.textContent = label);
+}
+async function toggleNotify() {
+  if (!notifySupported()) {
+    alert("This browser can't show notifications here. On an iPhone, open the game in Safari, tap Share, choose Add to Home Screen, then open it from the Home Screen.");
+    return;
+  }
+  if (notifyOn()) {
+    try { localStorage.setItem("cl_notify", "0"); } catch (e) {}
+    updateNotifyUI();
+    return;
+  }
+  const perm = Notification.permission === "granted" ? "granted" : await Notification.requestPermission();
+  if (perm !== "granted") {
+    alert("Notifications are blocked for this site. You can allow them in your browser's site settings.");
+    updateNotifyUI();
+    return;
+  }
+  try { localStorage.setItem("cl_notify", "1"); } catch (e) {}
+  ping();
+  updateNotifyUI();
+}
+function unlockAudio() {
+  try {
+    if (!actx) actx = new (window.AudioContext || window.webkitAudioContext)();
+    if (actx.state === "suspended") actx.resume();
+  } catch (e) {}
+}
+function ping() {
+  try {
+    unlockAudio();
+    const o = actx.createOscillator(), g = actx.createGain(), t = actx.currentTime;
+    o.type = "sine"; o.frequency.value = 660;
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(0.15, t + 0.02);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + 0.5);
+    o.connect(g); g.connect(actx.destination);
+    o.start(t); o.stop(t + 0.5);
+  } catch (e) {}
+}
+function alertUser(title, body, tag) {
+  if (!notifyOn()) return;
+  ping();
+  if (!document.hidden) return;
+  const opts = { body, tag, renotify: true };
+  const fallback = () => { try { new Notification(title, { body, tag }); } catch (e) {} };
+  if (navigator.serviceWorker && navigator.serviceWorker.getRegistration) {
+    navigator.serviceWorker.getRegistration().then(reg => reg ? reg.showNotification(title, opts) : fallback()).catch(fallback);
+  } else fallback();
+}
+document.addEventListener("pointerdown", unlockAudio);
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) { missed = 0; document.title = BASE_TITLE; }
+});
+if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => {});
+updateNotifyUI();
+
+/* ---------- Sign in and entering a game ---------- */
 async function start() {
   let { data } = await db.auth.getSession();
   if (!data.session) {
@@ -144,7 +248,8 @@ async function leaveGame() {
   if (error) return alert(error.message);
   if (channel) await db.removeChannel(channel);
   channel = null; me = null; game = null; rooms = []; players = {}; current = null;
-  unread = new Set(); seen = new Set();
+  unread = new Set(); seen = new Set(); chatStarted = false; missed = 0;
+  document.title = BASE_TITLE;
   $("msgs").innerHTML = "";
   $("err").textContent = "";
   closeDrawer();
@@ -158,14 +263,66 @@ async function enterGame(p) {
   $("gname").textContent = g.name;
   $("code").textContent = g.join_code;
   $("who").textContent = p.display_name;
-  screen("game");
   await loadPlayers();
+  subscribe();
+  updateNotifyUI();
+  if (game.status === "lobby") {
+    chatStarted = false;
+    screen("lobby");
+    renderLobby();
+  } else {
+    await beginChat();
+  }
+}
+
+async function beginChat() {
+  chatStarted = true;
+  screen("game");
   await loadRooms();
   const hall = rooms.find(r => r.kind === "hall");
   if (hall) openRoom(hall.id);
-  subscribe();
 }
 
+/* ---------- Lobby ---------- */
+function renderLobby() {
+  if (!game) return;
+  const list = Object.values(players).sort((a, b) => new Date(a.joined_at) - new Date(b.joined_at));
+  $("lb-name").textContent = game.name;
+  $("lb-code").textContent = game.join_code;
+  $("lb-count").textContent = list.length === 1 ? "1 player has joined" : list.length + " players have joined";
+  const box = $("lb-list");
+  box.innerHTML = "";
+  list.forEach(p => {
+    const c = document.createElement("span");
+    const isHost = p.user_id === game.host_id;
+    c.className = "chip" + (isHost ? " host" : "");
+    c.textContent = p.display_name + (isHost ? " (host)" : "");
+    box.appendChild(c);
+  });
+  const iAmHost = game.host_id === userId;
+  $("lb-host").style.display = iAmHost ? "flex" : "none";
+  $("lb-wait").style.display = iAmHost ? "none" : "block";
+  const enough = list.length >= MIN_PLAYERS;
+  $("lb-start").disabled = !enough;
+  $("lb-hint").textContent = enough ? "" : "Waiting for at least " + MIN_PLAYERS + " players (" + list.length + " so far).";
+}
+
+async function startGame() {
+  $("lb-start").disabled = true;
+  const { error } = await db.rpc("start_game", { p_game: game.id });
+  if (error) { alert(error.message); renderLobby(); return; }
+  const { data: g } = await db.from("games").select("*").eq("id", game.id).single();
+  if (g) onGameUpdate(g);
+}
+
+function onGameUpdate(g) {
+  game = g;
+  if (chatStarted) return;
+  if (g.status !== "lobby") beginChat();
+  else renderLobby();
+}
+
+/* ---------- Data loading ---------- */
 async function loadPlayers() {
   const { data } = await db.from("players").select("*").eq("game_id", game.id);
   players = {};
@@ -230,11 +387,28 @@ function subscribe() {
     .on("postgres_changes", { event: "INSERT", schema: "public", table: "messages" }, async p => {
       const m = p.new;
       if (!players[m.player_id]) await loadPlayers();
+      if (!rooms.find(r => r.id === m.room_id)) await loadRooms();
       if (m.room_id === current) addMessage(m);
       else { unread.add(m.room_id); loadRooms(); }
+      const mine = me && m.player_id === me.id;
+      if (!mine && (document.hidden || m.room_id !== current)) {
+        if (document.hidden) { missed++; document.title = "(" + missed + ") " + BASE_TITLE; }
+        const r = rooms.find(x => x.id === m.room_id);
+        const roomName = r ? (r.kind === "hall" ? "The Hall" : r.name) : "a room";
+        const who = players[m.player_id] ? players[m.player_id].display_name : "Someone";
+        alertUser(who + " in " + roomName, String(m.body).slice(0, 120), m.room_id);
+      }
+    })
+    .on("postgres_changes", { event: "UPDATE", schema: "public", table: "games" }, p => {
+      if (!game || p.new.id !== game.id) return;
+      const wasLobby = game.status === "lobby";
+      onGameUpdate(p.new);
+      if (wasLobby && p.new.status !== "lobby") alertUser("The game has begun", "Step into the Hall.", "start");
     })
     .on("postgres_changes", { event: "INSERT", schema: "public", table: "room_members" }, () => loadRooms())
-    .on("postgres_changes", { event: "*", schema: "public", table: "players" }, () => loadPlayers())
+    .on("postgres_changes", { event: "*", schema: "public", table: "players" }, () => {
+      loadPlayers().then(() => { if (!chatStarted) renderLobby(); });
+    })
     .subscribe();
 }
 
