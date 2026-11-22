@@ -53,6 +53,30 @@
   #newroom label input { min-height:0; width:20px; height:20px; }
   #scrim { display:none; position:fixed; inset:0; background:rgba(0,0,0,.6); z-index:10; }
 
+  .room { display:block; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  @keyframes blink { 0%,100% { background:transparent; } 50% { background:rgba(217,164,65,.4); } }
+  @keyframes pulse { 0%,100% { opacity:1; transform:scale(1); } 50% { opacity:.3; transform:scale(1.5); } }
+  .room.new { animation:blink 1.1s ease-in-out infinite; border-color:var(--gold); color:var(--gold); }
+  #menu.new { animation:blink 1.1s ease-in-out infinite; }
+  #menudot { animation:pulse 1.1s ease-in-out infinite; }
+  @media (prefers-reduced-motion: reduce) {
+    .room.new, #menu.new, #menudot { animation:none; }
+    .room.new, #menu.new { background:rgba(217,164,65,.3); }
+  }
+  #dealbar { display:none; flex-direction:column; gap:8px; padding:10px 12px; border-bottom:1px solid var(--gold); background:var(--panel); font-size:.9em; }
+  #letters { display:none; flex:1; overflow:auto; padding:12px; flex-direction:column; gap:12px; }
+  #letters .empty { text-align:center; opacity:.8; margin-top:24px; }
+  .letter { background:#f1e6c8; color:var(--ink); border-radius:10px; padding:14px 16px; border-left:6px solid var(--gold); display:flex; flex-direction:column; gap:8px; }
+  .letter.survived { border-left-color:#3f8f5a; }
+  .letter.murdered, .letter.banished { border-left-color:#a0283a; }
+  .letter.recruited { border-left-color:#6b3f8f; }
+  .letter h3 { margin:0; font-size:1.15em; }
+  .letter small { opacity:.7; }
+  .letter .body { white-space:pre-wrap; line-height:1.5; }
+  .letter.sealed { align-items:center; text-align:center; background:#e8d9ad; }
+  .letter.sealed button { width:100%; }
+  .seal { width:56px; height:56px; border-radius:50%; background:radial-gradient(circle at 35% 35%, #c0392b, #7a1a12); box-shadow:0 2px 6px rgba(0,0,0,.4); }
+
   @media (max-width:700px) {
     #menu { display:block; }
     #side { position:fixed; top:0; left:0; bottom:0; width:82%; max-width:320px; z-index:20; transform:translateX(-100%); transition:transform .2s; padding-top:calc(12px + env(safe-area-inset-top)); padding-bottom:calc(12px + env(safe-area-inset-bottom)); }
@@ -108,7 +132,7 @@
     <div id="rooms"></div>
     <button class="ghost" onclick="toggleNewRoom()">+ New private room</button>
     <div id="newroom">
-      <input id="nr-name" placeholder="Room name" maxlength="40">
+      <input id="nr-name" placeholder="Room name (optional)" maxlength="40">
       <div id="nr-players"></div>
       <button onclick="makeRoom()">Create room</button>
     </div>
@@ -121,7 +145,9 @@
       <h2 id="rname"></h2>
       <small id="who"></small>
     </div>
+    <div id="dealbar"><span>Has everyone had a chance to talk? Send out the sealed letters that tell each player whether they are Faithful or a Traitor.</span><button onclick="dealRoles()">Send the letters</button></div>
     <div id="msgs"></div>
+    <div id="letters"></div>
     <form id="send" onsubmit="sendMsg(event)">
       <input id="text" placeholder="Say something..." maxlength="1000" autocomplete="off">
       <button>Send</button>
@@ -143,6 +169,7 @@ const BASE_TITLE = "Cloak and Lantern";
 let userId = null, me = null, game = null, rooms = [], players = {}, current = null, channel = null;
 let seen = new Set(), unread = new Set();
 let chatStarted = false, missed = 0, actx = null;
+let letters = [], lettersUnread = 0, viewingLetters = false, roomMembers = {};
 
 function fail(e) { $("err").textContent = (e && e.message) ? e.message : String(e); }
 function screen(id) { document.querySelectorAll(".screen").forEach(s => s.classList.remove("on")); $(id).classList.add("on"); }
@@ -249,6 +276,8 @@ async function leaveGame() {
   if (channel) await db.removeChannel(channel);
   channel = null; me = null; game = null; rooms = []; players = {}; current = null;
   unread = new Set(); seen = new Set(); chatStarted = false; missed = 0;
+  letters = []; lettersUnread = 0; viewingLetters = false; roomMembers = {};
+  showPane("chat"); $("dealbar").style.display = "none";
   document.title = BASE_TITLE;
   $("msgs").innerHTML = "";
   $("err").textContent = "";
@@ -281,6 +310,8 @@ async function beginChat() {
   await loadRooms();
   const hall = rooms.find(r => r.kind === "hall");
   if (hall) openRoom(hall.id);
+  updateDealBar();
+  loadLetters();
 }
 
 /* ---------- Lobby ---------- */
@@ -317,6 +348,7 @@ async function startGame() {
 
 function onGameUpdate(g) {
   game = g;
+  updateDealBar();
   if (chatStarted) return;
   if (g.status !== "lobby") beginChat();
   else renderLobby();
@@ -333,24 +365,39 @@ async function loadRooms() {
   if (!game) return;
   const { data } = await db.from("rooms").select("*").eq("game_id", game.id).order("created_at");
   rooms = data || [];
+  const priv = rooms.filter(r => r.kind !== "hall").map(r => r.id);
+  const members = {};
+  if (priv.length) {
+    const { data: mem } = await db.from("room_members").select("room_id,player_id").in("room_id", priv);
+    (mem || []).forEach(x => { (members[x.room_id] = members[x.room_id] || []).push(x.player_id); });
+  }
+  roomMembers = members;
   const box = $("rooms");
   box.innerHTML = "";
+  const lb = document.createElement("button");
+  lb.className = "room" + (viewingLetters ? " sel" : "") + (lettersUnread ? " new" : "");
+  lb.textContent = "\u2709 Letters" + (lettersUnread ? " (" + lettersUnread + ")" : "");
+  lb.onclick = openLetters;
+  box.appendChild(lb);
   rooms.forEach(r => {
     const b = document.createElement("button");
-    b.className = "room" + (r.id === current ? " sel" : "");
-    b.textContent = (r.kind === "hall" ? "The Hall" : r.name) + (unread.has(r.id) ? " \u2022" : "");
+    b.className = "room" + (r.id === current ? " sel" : "") + (unread.has(r.id) ? " new" : "");
+    b.textContent = roomLabel(r);
     b.onclick = () => openRoom(r.id);
     box.appendChild(b);
   });
-  $("menudot").style.display = unread.size ? "block" : "none";
+  const any = unread.size > 0 || lettersUnread > 0;
+  $("menudot").style.display = any ? "block" : "none";
+  $("menu").classList.toggle("new", any);
 }
 
 async function openRoom(id) {
   current = id;
   unread.delete(id);
   closeDrawer();
+  showPane("chat");
   const room = rooms.find(r => r.id === id);
-  $("rname").textContent = room.kind === "hall" ? "The Hall" : room.name;
+  $("rname").textContent = roomLabel(room);
   loadRooms();
   const { data } = await db.from("messages").select("*").eq("room_id", id).order("created_at").limit(200);
   $("msgs").innerHTML = "";
@@ -394,7 +441,7 @@ function subscribe() {
       if (!mine && (document.hidden || m.room_id !== current)) {
         if (document.hidden) { missed++; document.title = "(" + missed + ") " + BASE_TITLE; }
         const r = rooms.find(x => x.id === m.room_id);
-        const roomName = r ? (r.kind === "hall" ? "The Hall" : r.name) : "a room";
+        const roomName = r ? roomLabel(r) : "a room";
         const who = players[m.player_id] ? players[m.player_id].display_name : "Someone";
         alertUser(who + " in " + roomName, String(m.body).slice(0, 120), m.room_id);
       }
@@ -405,11 +452,105 @@ function subscribe() {
       onGameUpdate(p.new);
       if (wasLobby && p.new.status !== "lobby") alertUser("The game has begun", "Step into the Hall.", "start");
     })
+    .on("postgres_changes", { event: "INSERT", schema: "public", table: "letters" }, async () => {
+      await loadLetters();
+      if (document.hidden) { missed++; document.title = "(" + missed + ") " + BASE_TITLE; }
+      alertUser("A letter has arrived", "Open Cloak and Lantern to read it.", "letter");
+    })
     .on("postgres_changes", { event: "INSERT", schema: "public", table: "room_members" }, () => loadRooms())
     .on("postgres_changes", { event: "*", schema: "public", table: "players" }, () => {
       loadPlayers().then(() => { if (!chatStarted) renderLobby(); });
     })
     .subscribe();
+}
+
+function roomLabel(r) {
+  if (!r) return "";
+  if (r.kind === "hall") return "The Hall";
+  if (r.name && r.name !== "Private room") return r.name;
+  const names = (roomMembers[r.id] || [])
+    .filter(id => !me || id !== me.id)
+    .map(id => players[id] ? players[id].display_name : null)
+    .filter(Boolean).sort();
+  return names.length ? names.join(", ") : "Just you";
+}
+
+/* ---------- Letters and the role delivery ---------- */
+function showPane(name) {
+  const l = name === "letters";
+  viewingLetters = l;
+  $("msgs").style.display = l ? "none" : "flex";
+  $("send").style.display = l ? "none" : "flex";
+  $("letters").style.display = l ? "flex" : "none";
+}
+
+function openLetters() {
+  current = null;
+  closeDrawer();
+  showPane("letters");
+  $("rname").textContent = "Letters";
+  renderLetters();
+  loadLetters();
+}
+
+async function loadLetters() {
+  if (!game) return;
+  const { data } = await db.from("letters").select("*").eq("game_id", game.id).order("created_at", { ascending: false });
+  letters = data || [];
+  lettersUnread = letters.filter(l => !l.read_at).length;
+  if (viewingLetters) renderLetters();
+  loadRooms();
+}
+
+function renderLetters() {
+  const box = $("letters");
+  box.innerHTML = "";
+  if (!letters.length) {
+    const e = document.createElement("p");
+    e.className = "empty";
+    e.textContent = "No letters yet. Special deliveries will arrive here.";
+    box.appendChild(e);
+    return;
+  }
+  letters.forEach(l => {
+    const c = document.createElement("div");
+    c.className = "letter " + l.kind + (l.read_at ? "" : " sealed");
+    if (!l.read_at) {
+      const seal = document.createElement("div"); seal.className = "seal";
+      const h = document.createElement("h3"); h.textContent = "Special delivery";
+      const t = document.createElement("span"); t.textContent = "A sealed letter is waiting for you.";
+      const b = document.createElement("button"); b.textContent = "Break the seal";
+      b.onclick = () => openLetter(l.id);
+      c.appendChild(seal); c.appendChild(h); c.appendChild(t); c.appendChild(b);
+    } else {
+      const h = document.createElement("h3"); h.textContent = l.title;
+      const sm = document.createElement("small");
+      sm.textContent = (l.day > 0 ? "Day " + l.day + " \u00b7 " : "") + new Date(l.created_at).toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
+      const body = document.createElement("div"); body.className = "body"; body.textContent = l.body;
+      c.appendChild(h); c.appendChild(sm); c.appendChild(body);
+    }
+    box.appendChild(c);
+  });
+}
+
+async function openLetter(id) {
+  const { error } = await db.rpc("open_letter", { p_letter: id });
+  if (error) return alert(error.message);
+  await loadLetters();
+}
+
+function updateDealBar() {
+  const show = !!game && game.status !== "lobby" && !game.roles_dealt && game.host_id === userId;
+  $("dealbar").style.display = show ? "flex" : "none";
+}
+
+async function dealRoles() {
+  if (!confirm("Send a sealed letter to every player telling them whether they are Faithful or a Traitor? Roles are chosen at random and this cannot be undone.")) return;
+  const { error } = await db.rpc("deal_roles", { p_game: game.id });
+  if (error) return alert(error.message);
+  const { data: g } = await db.from("games").select("*").eq("id", game.id).single();
+  if (g) onGameUpdate(g);
+  loadLetters();
 }
 
 function toggleNewRoom() {
