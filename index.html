@@ -77,7 +77,16 @@
   .letter.sealed button { width:100%; }
   .seal { width:56px; height:56px; border-radius:50%; background:radial-gradient(circle at 35% 35%, #c0392b, #7a1a12); box-shadow:0 2px 6px rgba(0,0,0,.4); }
 
+  #peoplebtn { display:none; padding:6px 12px; min-height:36px; }
+  #roster { display:none; flex-direction:column; gap:10px; padding:10px 12px; border-bottom:1px solid var(--gold); background:var(--panel); max-height:45%; overflow:auto; }
+  #roster label { display:flex; align-items:center; gap:8px; min-height:36px; }
+  #roster label input { min-height:0; width:20px; height:20px; }
+  #ro-members, #ro-others { display:flex; flex-direction:column; }
+  #ro-addbox { display:none; flex-direction:column; gap:6px; }
+  #roster h3 { margin:0; font-size:.85em; letter-spacing:.1em; text-transform:uppercase; color:var(--gold); font-weight:normal; }
+
   @media (max-width:700px) {
+    #who { display:none; }
     #menu { display:block; }
     #side { position:fixed; top:0; left:0; bottom:0; width:82%; max-width:320px; z-index:20; transform:translateX(-100%); transition:transform .2s; padding-top:calc(12px + env(safe-area-inset-top)); padding-bottom:calc(12px + env(safe-area-inset-bottom)); }
     #side.open { transform:none; }
@@ -143,9 +152,20 @@
     <div id="head">
       <button id="menu" class="ghost" onclick="openDrawer()" aria-label="Rooms">&#9776;<span id="menudot"></span></button>
       <h2 id="rname"></h2>
+      <button id="peoplebtn" class="ghost" onclick="toggleRoster()">People</button>
       <small id="who"></small>
     </div>
     <div id="dealbar"><span>Has everyone had a chance to talk? Send out the sealed letters that tell each player whether they are Faithful or a Traitor.</span><button onclick="dealRoles()">Send the letters</button></div>
+    <div id="roster">
+      <h3>In this room</h3>
+      <div id="ro-members"></div>
+      <button id="ro-split" class="ghost" onclick="splitRoom()">New room with ticked people</button>
+      <div id="ro-addbox">
+        <h3>Add people</h3>
+        <div id="ro-others"></div>
+        <button onclick="addToRoom()">Add ticked people to this room</button>
+      </div>
+    </div>
     <div id="msgs"></div>
     <div id="letters"></div>
     <form id="send" onsubmit="sendMsg(event)">
@@ -389,12 +409,14 @@ async function loadRooms() {
   const any = unread.size > 0 || lettersUnread > 0;
   $("menudot").style.display = any ? "block" : "none";
   $("menu").classList.toggle("new", any);
+  updatePeopleBtn();
 }
 
 async function openRoom(id) {
   current = id;
   unread.delete(id);
   closeDrawer();
+  $("roster").style.display = "none";
   showPane("chat");
   const room = rooms.find(r => r.id === id);
   $("rname").textContent = roomLabel(room);
@@ -464,15 +486,92 @@ function subscribe() {
     .subscribe();
 }
 
+function otherNames(r) {
+  return (roomMembers[r.id] || [])
+    .filter(id => !me || id !== me.id)
+    .map(id => players[id] ? players[id].display_name : null)
+    .filter(Boolean).sort();
+}
+
 function roomLabel(r) {
   if (!r) return "";
   if (r.kind === "hall") return "The Hall";
   if (r.name && r.name !== "Private room") return r.name;
-  const names = (roomMembers[r.id] || [])
-    .filter(id => !me || id !== me.id)
-    .map(id => players[id] ? players[id].display_name : null)
-    .filter(Boolean).sort();
-  return names.length ? names.join(", ") : "Just you";
+  const n = otherNames(r);
+  if (!n.length) return "Just you";
+  return n.length <= 2 ? n.join(", ") : n.slice(0, 2).join(", ") + " +" + (n.length - 2);
+}
+
+/* ---------- Room roster, adding people, splitting a room ---------- */
+function currentRoom() { return rooms.find(r => r.id === current); }
+function rosterIds(r) { return r.kind === "hall" ? Object.keys(players) : (roomMembers[r.id] || []); }
+
+function updatePeopleBtn() {
+  const r = currentRoom(), btn = $("peoplebtn");
+  if (!r || viewingLetters) { btn.style.display = "none"; $("roster").style.display = "none"; return; }
+  btn.style.display = "inline-block";
+  btn.textContent = "People (" + rosterIds(r).length + ")";
+  if ($("roster").style.display === "flex") renderRoster();
+}
+
+function toggleRoster() {
+  const box = $("roster");
+  if (box.style.display === "flex") { box.style.display = "none"; return; }
+  renderRoster();
+  box.style.display = "flex";
+}
+
+function renderRoster() {
+  const r = currentRoom();
+  if (!r) return;
+  const priv = r.kind !== "hall";
+  const ids = rosterIds(r), inRoom = new Set(ids);
+  const byName = (a, b) => a.display_name.localeCompare(b.display_name);
+  const mem = $("ro-members");
+  mem.innerHTML = "";
+  ids.map(id => players[id]).filter(Boolean).sort(byName).forEach(p => {
+    const l = document.createElement("label");
+    if (priv && p.id !== me.id) {
+      const c = document.createElement("input");
+      c.type = "checkbox"; c.value = p.id;
+      l.appendChild(c);
+    }
+    l.appendChild(document.createTextNode(p.display_name + (p.id === me.id ? " (you)" : "")));
+    mem.appendChild(l);
+  });
+  $("ro-split").style.display = priv && ids.length > 2 ? "block" : "none";
+  const others = Object.values(players).filter(p => !inRoom.has(p.id)).sort(byName);
+  const oth = $("ro-others");
+  oth.innerHTML = "";
+  others.forEach(p => {
+    const l = document.createElement("label");
+    const c = document.createElement("input");
+    c.type = "checkbox"; c.value = p.id;
+    l.appendChild(c);
+    l.appendChild(document.createTextNode(p.display_name));
+    oth.appendChild(l);
+  });
+  $("ro-addbox").style.display = priv && others.length ? "flex" : "none";
+}
+
+async function addToRoom() {
+  const r = currentRoom();
+  if (!r) return;
+  const ids = [...document.querySelectorAll("#ro-others input:checked")].map(c => c.value);
+  if (!ids.length) return alert("Tick the people you want to add.");
+  if (!confirm("Add " + ids.length + (ids.length === 1 ? " person" : " people") + " to this room? They will be able to read the earlier messages here.")) return;
+  const { error } = await db.rpc("add_room_members", { p_room: r.id, p_members: ids });
+  if (error) return alert(error.message);
+  await loadRooms();
+}
+
+async function splitRoom() {
+  const ids = [...document.querySelectorAll("#ro-members input:checked")].map(c => c.value);
+  if (!ids.length) return alert("Tick the people you want in the new room.");
+  const { data, error } = await db.rpc("create_private_room", { p_game: game.id, p_name: "Private room", p_members: ids });
+  if (error) return alert(error.message);
+  await loadRooms();
+  openRoom(data);
 }
 
 /* ---------- Letters and the role delivery ---------- */
@@ -482,6 +581,7 @@ function showPane(name) {
   $("msgs").style.display = l ? "none" : "flex";
   $("send").style.display = l ? "none" : "flex";
   $("letters").style.display = l ? "flex" : "none";
+  updatePeopleBtn();
 }
 
 function openLetters() {
